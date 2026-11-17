@@ -68,6 +68,37 @@ static bool read_sysfs_line(const char *path, char *buf, size_t buf_sz)
 	return buf[0] != 0;
 }
 
+// Konami's PS2 ParaParaParadise controller (0507:0011) reports nothing until it gets output report
+// 0x03 (Tatsh/pppps2pc, kernel/hid-konami-ppp.c). Sent through the hidraw node behind an event node;
+// the leading 0 is hidraw's report number for a device without report IDs.
+static void ppp_controller_enable(const char *devname)
+{
+	const char *ev = strrchr(devname, '/');
+	if (!ev) return;
+
+	char path[256];
+	snprintf(path, sizeof(path), "/sys/class/input%s/device/device/hidraw", ev);
+	DIR *d = opendir(path);
+	if (!d) return;
+
+	struct dirent *de;
+	while ((de = readdir(d)))
+	{
+		if (strncmp(de->d_name, "hidraw", 6)) continue;
+
+		snprintf(path, sizeof(path), "/dev/%s", de->d_name);
+		int fd = open(path, O_WRONLY | O_CLOEXEC);
+		if (fd < 0) break;
+
+		static const uint8_t enable[] = { 0x00, 0x03 };
+		if (write(fd, enable, sizeof(enable)) != sizeof(enable)) printf("ParaParaParadise controller: enable failed on %s\n", path);
+		else printf("ParaParaParadise controller: enabled via %s\n", path);
+		close(fd);
+		break;
+	}
+	closedir(d);
+}
+
 static uint16_t get_usb_bcd_device_version(const char *sysfs, uint16_t bustype, uint16_t fallback_version)
 {
 	if (!sysfs || !sysfs[0] || bustype != BUS_USB) return fallback_version;
@@ -5221,6 +5252,8 @@ int input_test(int getchar)
 								}
 							}
 						}
+
+						if (!input[n].mouse && input[n].vid == 0x0507 && input[n].pid == 0x0011) ppp_controller_enable(input[n].devname);
 
 						if (input[n].vid == 0x0079 && input[n].pid == 0x1802)
 						{
