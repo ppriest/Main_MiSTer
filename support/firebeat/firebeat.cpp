@@ -160,7 +160,7 @@ static void firebeat_fill(fb_slot *s, uint64_t lba, uint8_t *buf, int sz)
 		}
 		else if (s->img.kind != DISCIMG_CD)
 		{
-			if (n > (int)(s->data_bytes - pos)) n = (int)(s->data_bytes - pos);
+			if ((uint64_t)n > s->data_bytes - pos) n = (int)(s->data_bytes - pos);
 			discimg_read_bytes(&s->img, pos, n, buf + done);
 		}
 		else
@@ -171,7 +171,7 @@ static void firebeat_fill(fb_slot *s, uint64_t lba, uint8_t *buf, int sz)
 			if (frame >= s->frames)
 			{
 				// the padding to a 512-byte block
-				if (n > (int)(s->data_bytes - pos)) n = (int)(s->data_bytes - pos);
+				if ((uint64_t)n > s->data_bytes - pos) n = (int)(s->data_bytes - pos);
 				memset(buf + done, 0, n);
 			}
 			else fill_frame(s, frame, off, n, buf + done);

@@ -119,6 +119,7 @@ static int open_cue(discimg_t *d, const char *name)
 	uint32_t cur_ss = 0;
 	int      index0 = -1;
 	int      prev_in_file = -1;   // last track of the current FILE
+	int      cur_session = 1;
 	int      bad = 0;
 
 	char *line = strtok(txt, "\r\n");
@@ -170,6 +171,11 @@ static int open_cue(discimg_t *d, const char *name)
 				bad = 1;
 			}
 		}
+		else if (!strncasecmp(line, "REM SESSION", 11))
+		{
+			int ses = 0;
+			if (sscanf(line + 11, "%d", &ses) == 1 && ses > 0 && ses < 100) cur_session = ses;
+		}
 		else if (!strncasecmp(line, "PREGAP", 6))
 		{
 			int m = 0, s = 0, f = 0;
@@ -206,6 +212,7 @@ static int open_cue(discimg_t *d, const char *name)
 				k->indexes[1]  = (int)index1;
 				k->index_num   = 2;
 				pending_pregap = 0;
+				d->session[t->last] = (uint8_t)cur_session;
 
 				// the previous track in the same FILE ends where this one's gap begins
 				if (prev_in_file >= 0)
@@ -251,7 +258,7 @@ static int probe_pvd(fileTYPE *f, uint32_t sec_size, uint32_t off)
 	return 0;
 }
 
-static int open_raw(discimg_t *d, const char *name)
+static int open_raw(discimg_t *d, const char *name, int flags)
 {
 	cd_track_t *k = &d->toc.tracks[0];
 	if (!FileOpen(&k->f, name)) return DISCIMG_REJECT;
@@ -282,7 +289,8 @@ static int open_raw(discimg_t *d, const char *name)
 		if (!memcmp(hdr, sync, sizeof(sync))) found = 1;
 	}
 
-	if (found <= 0)
+	if (found < 0 && (flags & DISCIMG_FLAT_TRACK)) found = 0;
+	if (found < 0 || (found == 0 && !(flags & DISCIMG_FLAT_TRACK)))
 	{
 		d->bytes = (uint64_t)k->f.size;
 		FileClose(&k->f);
@@ -302,14 +310,15 @@ static int open_raw(discimg_t *d, const char *name)
 	return DISCIMG_OPENED;
 }
 
-int discimg_open(discimg_t *d, const char *name, const char *tag)
+int discimg_open(discimg_t *d, const char *name, const char *tag, int flags)
 {
 	memset(d, 0, sizeof(*d));
 	d->tag = tag;
+	memset(d->session, 1, sizeof(d->session));
 	int len = strlen(name);
 	if (len > 4 && !strcasecmp(name + len - 4, ".chd")) return open_chd(d, name);
 	if (len > 4 && !strcasecmp(name + len - 4, ".cue")) return open_cue(d, name);
-	return open_raw(d, name);
+	return open_raw(d, name, flags);
 }
 
 int discimg_read(discimg_t *d, int trk, int lba, uint32_t off, int n, uint8_t *dst)

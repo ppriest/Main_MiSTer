@@ -2,7 +2,8 @@
 // file itself: a CD as a CHD, a .cue with its BINARY files, or a single raw data track (2048, 2336
 // or 2352 bytes a sector, told apart by its ISO 9660 / High Sierra volume descriptor); a DVD or a
 // hard disk as a CHD. The core-specific part (which slot, what layout the core reads) stays in the
-// core's support directory: see support/sun/sun_cdrom.cpp and support/firebeat/firebeat.cpp.
+// core's support directory. cdslot.cpp is the CD-ROM slot sun, hp9k and ibmrs6k share;
+// support/firebeat/firebeat.cpp shows a core with its own layout.
 
 #ifndef DISCIMG_H
 #define DISCIMG_H
@@ -25,11 +26,15 @@ enum discimg_open_t
 	DISCIMG_REJECT = 2, // unreadable or unsupported, the reason logged
 };
 
+// discimg_open flags
+#define DISCIMG_FLAT_TRACK 1   // a flat file opens as a MODE1/2048 track instead of returning DISCIMG_FLAT
+
 struct discimg_t
 {
 	discimg_kind_t kind;
 	int       is_chd;
 	toc_t     toc;          // CD: disc LBAs (no +150); a track's frame lba is lba + offset in its file or the CHD
+	uint8_t   session[100]; // CD: each track's session, 1 unless a .cue's REM SESSION says otherwise
 	uint8_t  *hunkbuf;      // CHD: one hunk
 	int       hunknum;      // the hunk in hunkbuf, or -1
 	uint64_t  bytes;        // DVD, HDD: the CHD's logical bytes; FLAT: the file's size
@@ -39,7 +44,7 @@ struct discimg_t
 
 // .chd: a CD, DVD or hard disk; .cue: its tracks; anything else: a single raw data track.
 // Close with discimg_close whatever it returns.
-int  discimg_open(discimg_t *d, const char *name, const char *tag);
+int  discimg_open(discimg_t *d, const char *name, const char *tag, int flags = 0);
 void discimg_close(discimg_t *d);
 
 // the first track that is not audio, or -1
