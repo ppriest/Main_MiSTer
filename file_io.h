@@ -9,6 +9,7 @@
 #include "spi.h"
 
 struct fileZipArchive;
+struct discimg_t;
 
 struct fileTYPE
 {
@@ -20,6 +21,7 @@ struct fileTYPE
 	int             mode;
 	int             type;
 	fileZipArchive *zip;
+	discimg_t      *disc;   // a hard disk CHD opened by FileOpenDisk
 	__off64_t       size;
 	__off64_t       offset;
 	char            path[1024];
@@ -85,6 +87,9 @@ int  isUSBMounted();
 int  FileOpenZip(fileTYPE *file, const char *name, uint32_t crc32);
 int  FileOpenEx(fileTYPE *file, const char *name, int mode, char mute = 0, int use_zip = 1);
 int  FileOpen(fileTYPE *file, const char *name, char mute = 0);
+// a hard disk CHD as its flat sectors, writes kept in a save file (support/discimg/journal.h);
+// anything else as FileOpenEx, a CD or DVD CHD read-only
+int  FileOpenDisk(fileTYPE *file, const char *name, int mode);
 int FileClose(fileTYPE *file);
 
 __off64_t FileGetSize(fileTYPE *file);

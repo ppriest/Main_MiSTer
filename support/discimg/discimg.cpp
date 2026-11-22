@@ -1,14 +1,19 @@
 // Disc and disk images: CHD (CD, DVD, hard disk), CUE/BIN and single raw data tracks.
 
+#include <errno.h>
 #include <stdio.h>
 #include <string.h>
 #include <strings.h>
 #include <stdlib.h>
+#include <unistd.h>
+#include <string>
 
 #include "../../file_io.h"
 #include "../../user_io.h"
 #include "../chd/mister_chd.h"
+#include "../../lib/md5/md5.h"
 #include "discimg.h"
+#include "journal.h"
 
 #define DVD_TAG CHD_MAKE_TAG('D','V','D',' ')   // chdman createdvd's metadata
 #define HDD_TAG CHD_MAKE_TAG('G','D','D','D')   // chdman createhd's geometry
@@ -37,12 +42,84 @@ void discimg_close(discimg_t *d)
 		if (d->toc.tracks[i].f.opened()) FileClose(&d->toc.tracks[i].f);
 	}
 	if (d->hunkbuf) free(d->hunkbuf);
+	discimg_journal_close(d->journal);
 	const char *tag = d->tag;
 	memset(d, 0, sizeof(*d));
 	d->tag = tag;
 }
 
-static int open_chd(discimg_t *d, const char *name)
+// the identity a hard disk's save file is tied to: the CHD's SHA1, or an MD5 of the file when the
+// CHD has none
+static int hdd_identity(discimg_t *d, uint8_t identity[20], uint8_t *type)
+{
+	const chd_header *h = chd_get_header(d->toc.chd_f);
+	static const uint8_t zero[20] = {};
+	memcpy(identity, h->sha1, 20);
+	*type = 1;
+	if (memcmp(identity, zero, 20))
+	{
+		return 1;
+	}
+
+	int fd = fileno((FILE *)chd_core_file(d->toc.chd_f)->argp);
+	MD5Context md5;
+	MD5Init(&md5);
+	static uint8_t buffer[32768];
+	__off64_t offset = 0;
+	for (;;)
+	{
+		ssize_t n = pread64(fd, buffer, sizeof(buffer), offset);
+		if (n < 0 && errno == EINTR)
+		{
+			continue;
+		}
+		if (n < 0)
+		{
+			return 0;
+		}
+		if (!n)
+		{
+			break;
+		}
+		MD5Update(&md5, buffer, (unsigned)n);
+		offset += n;
+	}
+	memset(identity, 0, 20);
+	MD5Final(identity, &md5);
+	*type = 2;
+	return 1;
+}
+
+// a hard disk's saved writes: <saves>/<core>/<image>.sav
+static int open_journal(discimg_t *d, const char *name, int writable)
+{
+	const chd_header *h = chd_get_header(d->toc.chd_f);
+	if (d->bps != 512 || h->unitbytes != 512 || !h->hunkbytes || (h->hunkbytes % 512) || (h->logicalbytes % 512))
+	{
+		printf("%s: %s: saved writes need 512-byte sectors\n", d->tag, name);
+		return 0;
+	}
+	uint8_t identity[20];
+	uint8_t type;
+	if (!hdd_identity(d, identity, &type))
+	{
+		printf("%s: %s: cannot read the image to identify it\n", d->tag, name);
+		return 0;
+	}
+	char save[2100];
+	FileGenerateSavePath(name, save);
+	std::string path(getFullPath(save));
+	std::string root(getFullPath(""));
+	if (discimg_journal_open(path.c_str(), root.c_str(), d->bytes, identity, type, writable != 0, &d->journal))
+	{
+		printf("%s: saved writes %s: %s\n", d->tag, path.c_str(), strerror(errno));
+		return 0;
+	}
+	d->writable = writable;
+	return 1;
+}
+
+static int open_chd(discimg_t *d, const char *name, int flags)
 {
 	if (mister_load_chd(name, &d->toc) != CHDERR_NONE || !d->toc.chd_f)
 	{
@@ -80,6 +157,10 @@ static int open_chd(discimg_t *d, const char *name)
 		d->heads = heads;
 		d->secs = secs;
 		d->bps = bps;
+		if ((flags & (DISCIMG_JOURNAL | DISCIMG_WRITABLE)) && !open_journal(d, name, flags & DISCIMG_WRITABLE))
+		{
+			return DISCIMG_REJECT;
+		}
 		return DISCIMG_OPENED;
 	}
 
@@ -316,7 +397,7 @@ int discimg_open(discimg_t *d, const char *name, const char *tag, int flags)
 	d->tag = tag;
 	memset(d->session, 1, sizeof(d->session));
 	int len = strlen(name);
-	if (len > 4 && !strcasecmp(name + len - 4, ".chd")) return open_chd(d, name);
+	if (len > 4 && !strcasecmp(name + len - 4, ".chd")) return open_chd(d, name, flags);
 	if (len > 4 && !strcasecmp(name + len - 4, ".cue")) return open_cue(d, name);
 	return open_raw(d, name, flags);
 }
@@ -385,7 +466,32 @@ int discimg_read_bytes(discimg_t *d, uint64_t pos, int n, uint8_t *dst)
 		uint32_t off = (uint32_t)(pos % hb);
 		int m = (int)(hb - off);
 		if (m > n) m = n;
-		if (pos >= d->bytes)
+		int saved = 0;
+		if (d->journal && pos < d->bytes)
+		{
+			// sector by sector: each may have been written
+			uint8_t sec[512];
+			uint32_t so = (uint32_t)(pos % 512);
+			if (m > (int)(512 - so))
+			{
+				m = 512 - so;
+			}
+			saved = discimg_journal_read(d->journal, pos / 512, sec);
+			if (saved > 0)
+			{
+				memcpy(dst, sec + so, m);
+			}
+			else if (saved < 0)
+			{
+				memset(dst, 0, m);
+				ok = 0;
+			}
+		}
+		if (saved)
+		{
+			// served from the journal, or failed there
+		}
+		else if (pos >= d->bytes)
 		{
 			memset(dst, 0, m);
 			ok = 0;
@@ -405,4 +511,29 @@ int discimg_read_bytes(discimg_t *d, uint64_t pos, int n, uint8_t *dst)
 		n -= m;
 	}
 	return ok;
+}
+
+int discimg_write_bytes(discimg_t *d, uint64_t pos, uint32_t n, const uint8_t *src)
+{
+	if (!d->writable || !d->journal)
+	{
+		errno = EROFS;
+		return 0;
+	}
+	while (n)
+	{
+		uint32_t m = n;
+		if (m > JOURNAL_MAX_SECTORS * 512)
+		{
+			m = JOURNAL_MAX_SECTORS * 512;
+		}
+		if (discimg_journal_write(d->journal, pos, src, m))
+		{
+			return 0;
+		}
+		pos += m;
+		src += m;
+		n -= m;
+	}
+	return 1;
 }

@@ -28,6 +28,10 @@ enum discimg_open_t
 
 // discimg_open flags
 #define DISCIMG_FLAT_TRACK 1   // a flat file opens as a MODE1/2048 track instead of returning DISCIMG_FLAT
+#define DISCIMG_JOURNAL    2   // a hard disk CHD reads through the writes saved for it (journal.h)
+#define DISCIMG_WRITABLE   4   // DISCIMG_JOURNAL, and a hard disk CHD takes writes into it; others open read-only
+
+struct discimg_journal;
 
 struct discimg_t
 {
@@ -39,6 +43,8 @@ struct discimg_t
 	int       hunknum;      // the hunk in hunkbuf, or -1
 	uint64_t  bytes;        // DVD, HDD: the CHD's logical bytes; FLAT: the file's size
 	uint32_t  cyls, heads, secs, bps;   // HDD
+	discimg_journal *journal;           // HDD opened with DISCIMG_JOURNAL or DISCIMG_WRITABLE
+	int       writable;                 // HDD opened with DISCIMG_WRITABLE
 	const char *tag;        // log prefix
 };
 
@@ -61,7 +67,12 @@ int  discimg_read(discimg_t *d, int trk, int lba, uint32_t off, int n, uint8_t *
 // sector inside the sync and header it was stored without (EDC and ECC left zero).
 int  discimg_read_frame(discimg_t *d, int trk, int lba, uint8_t *frame);
 
-// DVD, HDD: bytes [pos, pos + n). 0 and dst zeroed on a read error or past the end.
+// DVD, HDD: bytes [pos, pos + n), a hard disk's saved writes included. 0 and dst zeroed on a read
+// error or past the end.
 int  discimg_read_bytes(discimg_t *d, uint64_t pos, int n, uint8_t *dst);
+
+// a writable HDD: whole 512-byte sectors [pos, pos + n) into its journal, durable on return. 0 on
+// an error, errno set.
+int  discimg_write_bytes(discimg_t *d, uint64_t pos, uint32_t n, const uint8_t *src);
 
 #endif

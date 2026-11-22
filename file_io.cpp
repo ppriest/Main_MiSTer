@@ -33,6 +33,7 @@
 #include "scheduler.h"
 #include "video.h"
 #include "support.h"
+#include "support/discimg/discimg.h"
 
 #define MIN(a,b) (((a)<(b)) ? (a) : (b))
 
@@ -133,6 +134,7 @@ fileTYPE::fileTYPE()
 	mode = 0;
 	type = 0;
 	zip = 0;
+	disc = 0;
 	size = 0;
 	offset = 0;
 }
@@ -342,6 +344,12 @@ static int isPathRegularFile(const char *path, int use_zip = 1)
 int FileClose(fileTYPE *file)
 {
 	int err = 0;
+	if (file->disc)
+	{
+		discimg_close(file->disc);
+		free(file->disc);
+		file->disc = 0;
+	}
 
 	if (file->zip)
 	{
@@ -594,6 +602,10 @@ int FileOpenEx(fileTYPE *file, const char *name, int mode, char mute, int use_zi
 
 __off64_t FileGetSize(fileTYPE *file)
 {
+	if (file->disc)
+	{
+		return file->size;
+	}
 	if (file->filp)
 	{
 		struct stat64 st;
@@ -621,9 +633,73 @@ int FileOpen(fileTYPE *file, const char *name, char mute)
 	return FileOpenEx(file, name, O_RDONLY, mute);
 }
 
+int FileOpenDisk(fileTYPE *file, const char *name, int mode)
+{
+	int len = strlen(name);
+	if (len <= 4 || strcasecmp(name + len - 4, ".chd"))
+	{
+		return FileOpenEx(file, name, mode);
+	}
+	if (!FileOpenEx(file, name, O_RDONLY))
+	{
+		return 0;
+	}
+
+	discimg_t *d = (discimg_t *)calloc(1, sizeof(discimg_t));
+	if (!d)
+	{
+		FileClose(file);
+		return 0;
+	}
+	int writable = (mode & O_ACCMODE) != O_RDONLY;
+	int r = discimg_open(d, name, "FileOpenDisk", writable ? DISCIMG_WRITABLE : DISCIMG_JOURNAL);
+	if (r == DISCIMG_OPENED && d->kind == DISCIMG_HDD)
+	{
+		file->disc = d;
+		file->size = d->bytes;
+		file->offset = 0;
+		file->mode = d->writable ? O_RDWR : O_RDONLY;
+		return 1;
+	}
+
+	// a hard disk whose saved writes cannot be used fails; any other CHD stays the plain file
+	int fail = (r != DISCIMG_OPENED && d->kind == DISCIMG_HDD);
+	discimg_close(d);
+	free(d);
+	if (fail)
+	{
+		FileClose(file);
+		return 0;
+	}
+	return 1;
+}
+
 int FileSeek(fileTYPE *file, __off64_t offset, int origin)
 {
-	if (file->filp)
+	if (file->disc)
+	{
+		__off64_t base;
+		switch (origin)
+		{
+		case SEEK_SET:
+			base = 0;
+			break;
+		case SEEK_CUR:
+			base = file->offset;
+			break;
+		case SEEK_END:
+			base = file->size;
+			break;
+		default:
+			return 0;
+		}
+		if (offset < -base || offset > INT64_MAX - base)
+		{
+			return 0;
+		}
+		offset += base;
+	}
+	else if (file->filp)
 	{
 		__off64_t res = fseeko64(file->filp, offset, origin);
 		if (res < 0)
@@ -694,7 +770,26 @@ int FileReadAdv(fileTYPE *file, void *pBuffer, int length, int failres)
 {
 	ssize_t ret = 0;
 
-	if (file->filp)
+	if (file->disc)
+	{
+		if (length < 0)
+		{
+			return failres;
+		}
+		memset(pBuffer, 0, length);
+		if (file->offset >= file->size)
+		{
+			return 0;
+		}
+		ret = MIN((__off64_t)length, file->size - file->offset);
+		if (!discimg_read_bytes(file->disc, file->offset, (int)ret, (uint8_t *)pBuffer))
+		{
+			printf("FileReadAdv error: %s.\n", file->name);
+			memset(pBuffer, 0, length);
+			return failres;
+		}
+	}
+	else if (file->filp)
 	{
 		ret = fread(pBuffer, 1, length, file->filp);
 		if (ret != length && ferror(file->filp))
@@ -734,6 +829,25 @@ int FileReadSec(fileTYPE *file, void *pBuffer)
 int FileWriteAdv(fileTYPE *file, void *pBuffer, int length, int failres)
 {
 	int ret;
+
+	if (file->disc)
+	{
+		if (length < 0)
+		{
+			return failres;
+		}
+		if (!length)
+		{
+			return 0;
+		}
+		if (!discimg_write_bytes(file->disc, file->offset, length, (const uint8_t *)pBuffer))
+		{
+			printf("FileWriteAdv error: %s (%s).\n", file->name, strerror(errno));
+			return failres;
+		}
+		file->offset += length;
+		return length;
+	}
 
 	if (file->filp)
 	{
